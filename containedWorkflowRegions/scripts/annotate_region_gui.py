@@ -32,9 +32,19 @@ class RegionAnnotator:
         os.makedirs(self.images_train_dir, exist_ok=True)
         os.makedirs(self.labels_train_dir, exist_ok=True)
         os.makedirs(self.jpgs_dir, exist_ok=True) # Ensure jpgs dir exists
-
+        
+        # --- New tracking logic ---
+        self.processed_log_path = os.path.join(self.training_dir, "processed_log.txt")
+        self.processed_images = set()
+        self.load_processed_images()
+        
         # Annotation state
-        self.all_image_paths = sorted(glob.glob(os.path.join(self.jpgs_dir, "*.jpg"))) # Load sorted list
+        self.all_image_paths_full = sorted(glob.glob(os.path.join(self.jpgs_dir, "*.jpg")))
+        # Filter to only include images not already processed
+        self.all_image_paths = self.filter_processed_images(self.all_image_paths_full)
+        
+        print(f"Found {len(self.all_image_paths_full)} total images, {len(self.all_image_paths)} not yet processed")
+        
         self.current_image_index = -1 # Start before the first image
         self.image_path = None # Store path of the current image
         self.image = None # This will hold the full image for annotation
@@ -64,6 +74,42 @@ class RegionAnnotator:
         
         # Initial load
         self.load_next_image()
+    
+    def load_processed_images(self):
+        """Load the list of already processed images from the log file."""
+        if os.path.exists(self.processed_log_path):
+            try:
+                with open(self.processed_log_path, 'r') as f:
+                    for line in f:
+                        line = line.strip()
+                        if line:  # Skip empty lines
+                            self.processed_images.add(line)
+                print(f"Loaded {len(self.processed_images)} previously processed images from log")
+            except Exception as e:
+                print(f"Error reading processed log: {e}")
+        else:
+            print("No processed log found. Will create a new one when saving annotations.")
+    
+    def filter_processed_images(self, all_paths):
+        """Filter out images that have already been processed."""
+        filtered_paths = []
+        for path in all_paths:
+            basename = os.path.basename(path)
+            if basename not in self.processed_images:
+                filtered_paths.append(path)
+        return filtered_paths
+    
+    def mark_as_processed(self, image_path):
+        """Mark an image as processed in the log file."""
+        basename = os.path.basename(image_path)
+        self.processed_images.add(basename)
+        try:
+            with open(self.processed_log_path, 'a') as f:
+                f.write(f"{basename}\n")
+            return True
+        except Exception as e:
+            print(f"Error writing to processed log: {e}")
+            return False
     
     def get_class_name(self, class_id):
         for name, id_ in self.classes.items():
@@ -100,18 +146,28 @@ names: {class_names_list}
     def load_next_image(self):
         """Loads the next image from the sorted list and prepares for annotation."""
         if not self.all_image_paths:
-             print("No images found in the jpgs directory!")
-             self.image = None # Ensure no image is displayed
-             self.redraw_annotations()
+             print("No unprocessed images found! All images have been annotated or skipped.")
+             # Display a blank image with a message
+             blank_height, blank_width = 600, 800
+             blank_image = np.full((blank_height, blank_width, 3), 200, dtype=np.uint8)  # Light gray
+             message = "All images processed! Press 'q' to quit."
+             cv2.putText(blank_image, message, (50, 300), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 0), 2)
+             self.image = None
+             self.display_image = blank_image
+             self.clone = blank_image.copy()
+             cv2.imshow(self.FIXED_WINDOW_NAME, self.clone)
              return False
              
         self.current_image_index += 1
         if self.current_image_index >= len(self.all_image_paths):
             print("Reached end of image list.")
-            self.current_image_index = 0 # Wrap around to the beginning
-            # Or optionally: 
-            # print("Reached end of image list. No more images.")
-            # return False 
+            # If we've reached the end of our filtered list but still have unprocessed images
+            # (could have been filtered out earlier but now we have a fresh filter)
+            self.all_image_paths = self.filter_processed_images(self.all_image_paths_full)
+            if not self.all_image_paths:
+                print("All images have been processed.")
+                return self.load_next_image()  # This will show the blank image
+            self.current_image_index = 0
             
         self.image_path = self.all_image_paths[self.current_image_index]
         
@@ -122,6 +178,11 @@ names: {class_names_list}
                 print(f"Failed to load image: {self.image_path}. Skipping.")
                 self.image = None
                 self.redraw_annotations()
+                # Mark as processed so we don't keep trying to load it
+                self.mark_as_processed(self.image_path)
+                # Remove from current list
+                self.all_image_paths.pop(self.current_image_index)
+                self.current_image_index -= 1  # Adjust index
                 return self.load_next_image() # Try the next one
                 
             # Store the original image dimensions
@@ -158,6 +219,11 @@ names: {class_names_list}
             print(f"Error loading image {self.image_path}: {e}")
             self.image = None
             self.redraw_annotations()
+            # Mark this image as processed so we don't keep trying
+            self.mark_as_processed(self.image_path)
+            # Remove from current list 
+            self.all_image_paths.pop(self.current_image_index)
+            self.current_image_index -= 1  # Adjust index
             return self.load_next_image() # Try the next one
 
     def redraw_annotations(self):
@@ -186,8 +252,9 @@ names: {class_names_list}
              color = self.class_colors[self.current_class_id % len(self.class_colors)]
              cv2.rectangle(self.clone, (x1_disp, y1_disp), (x2_disp, y2_disp), color, 2)
 
-        # Add status text
-        status_text = f"Class: {self.get_class_name(self.current_class_id)} ({len(self.annotations)} boxes) | Img: {self.current_image_index + 1}/{len(self.all_image_paths)}"
+        # Add status text with remaining count
+        remaining = len(self.all_image_paths) - self.current_image_index - 1
+        status_text = f"Class: {self.get_class_name(self.current_class_id)} | Boxes: {len(self.annotations)} | Image: {self.current_image_index + 1}/{len(self.all_image_paths)} | Remaining: {remaining}"
         cv2.putText(self.clone, status_text, (10, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2, cv2.LINE_AA)
         
         cv2.imshow(self.FIXED_WINDOW_NAME, self.clone)
@@ -287,15 +354,23 @@ names: {class_names_list}
         with open(training_label_path, 'w') as label_file:
             label_file.write("\n".join(label_lines))
         
-        print(f"Saved image as {training_image_name} and annotations ({len(label_lines)} boxes)")
-        return True
+        # Mark this image as processed in our log
+        if self.mark_as_processed(self.image_path):
+            # Remove from the current list
+            self.all_image_paths.pop(self.current_image_index)
+            self.current_image_index -= 1  # Adjust index so the next image loads correctly
+            
+            print(f"Saved image as {training_image_name} and annotations ({len(label_lines)} boxes)")
+            print(f"Marked {os.path.basename(self.image_path)} as processed")
+            return True
+        return False
     
     def run(self):
         print("\nInstructions:")
         print(" - Draw boxes for the current class on the full card image.")
         print(" - Keys 1, 2, 3: Switch to class Name(1), Attack(2), Number(3)")
         print(" - 's': Save annotations for this image and load next")
-        print(" - 'n': Skip to next image without saving")
+        print(" - 'n': Skip to next image without saving (will still mark as processed)")
         print(" - 'z': Undo the last drawn box")
         print(" - 'q': Quit")
             
@@ -307,7 +382,13 @@ names: {class_names_list}
                     self.load_next_image() # Load next after saving
             
             elif key == ord('n'): 
-                print("Skipping image...")
+                print(f"Skipping image {os.path.basename(self.image_path)}...")
+                # Mark as processed so we don't see it again
+                if self.image_path:
+                    self.mark_as_processed(self.image_path)
+                    # Remove from current list
+                    self.all_image_paths.pop(self.current_image_index)
+                    self.current_image_index -= 1  # Adjust index
                 self.load_next_image() # Load next
             
             elif key == ord('z'): 
