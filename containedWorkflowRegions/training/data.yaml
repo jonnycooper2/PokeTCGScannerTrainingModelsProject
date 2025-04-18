@@ -1,0 +1,4 @@
+path: C:/Users/jonat/PokeTCGScannerTrainingModelsProject/containedWorkflowRegions/training
+train: images/train
+val: images/train
+names: ['name', 'attack', 'number']

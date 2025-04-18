@@ -1,0 +1,14 @@
+# Core ML Frameworks
+ultralytics>=8.0.0  # For YOLOv8
+torch>=1.8        # Required by ultralytics (consider specific CUDA version if needed)
+
+# Image Processing
+opencv-python>=4.5.0
+Pillow>=9.0.0
+
+# Utilities
+numpy>=1.20.0
+PyYAML>=5.4.0
+
+# GUI (Optional for test_region_yolo.py drag-and-drop)
+tkinterdnd2>=0.3.0 
